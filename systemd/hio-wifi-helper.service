@@ -1,0 +1,14 @@
+[Unit]
+Description=HIO WiFi helper (nmcli wrapper)
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/hio-wifi-helper
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
