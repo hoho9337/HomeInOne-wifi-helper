@@ -1,0 +1,43 @@
+name: release
+
+# Tag-driven release. Push `git tag v0.1.0 && git push --tags` and this
+# workflow attaches both arch binaries to the resulting GitHub Release.
+# setup-pad.sh in HomeInOne-deploy curls the arm64 binary by tag at provision
+# time (HIO_WIFI_HELPER_VERSION env var, default v0.1.0).
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # required to create/upload the release
+
+jobs:
+  build:
+    name: build linux/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: cross-build
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p bin
+          go build -ldflags="-s -w" -o "bin/hio-wifi-helper.${{ matrix.goarch }}" ./
+
+      - name: upload binary to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bin/hio-wifi-helper.${{ matrix.goarch }}
+          # Both matrix jobs target the same Release; action-gh-release dedupes.
+          generate_release_notes: true
