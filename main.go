@@ -1,12 +1,16 @@
-// hio-wifi-helper — small daemon that wraps `nmcli` behind a Unix-socket HTTP API.
+// hio-wifi-helper — the panel's privileged local API, behind a Unix socket.
 //
-// On the HIO pad the Chromium-kiosk UI lives in a Docker container that
-// can't reach NetworkManager directly. The Caddy reverse-proxy in that
-// container forwards /api/wifi/* to /run/hio-wifi.sock, which `handle_path`
-// strips — so this daemon serves the bare paths /scan /status /connect
-// /disconnect.
+// On the HIO pad the Chromium-kiosk UI lives in a Docker container, so it can
+// reach neither NetworkManager nor /sys. This daemon runs as root on the host
+// and exposes the few things the UI legitimately needs to touch. Caddy in the
+// pad-ui container forwards to /run/hio-wifi.sock with the prefix stripped:
 //
-// JSON response shapes match HomeInOne-pad/src/lib/wifi/client.ts.
+//	/api/wifi/*    → /scan /status /connect /disconnect   (nmcli, this file)
+//	/api/display/* → /display/brightness                  (backlight, display.go)
+//
+// (The name is historical — wifi was the first consumer.)
+//
+// JSON response shapes match HomeInOne-pad/src/lib/{wifi,display}/client.ts.
 package main
 
 import (
@@ -65,6 +69,9 @@ func main() {
 	mux.HandleFunc("GET /status", statusHandler)
 	mux.HandleFunc("POST /connect", connectHandler)
 	mux.HandleFunc("POST /disconnect", disconnectHandler)
+	// Backlight — see display.go. Caddy maps /api/display/* onto the same socket.
+	mux.HandleFunc("GET /display/brightness", brightnessGetHandler)
+	mux.HandleFunc("POST /display/brightness", brightnessSetHandler)
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 
