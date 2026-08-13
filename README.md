@@ -9,7 +9,27 @@ Endpoints (paths after Caddy strips the `/api/wifi` prefix):
 - `POST /connect` — body `{ ssid, password }`, returns the post-connect status
 - `POST /disconnect` — returns the post-disconnect status
 
-The socket defaults to `/run/hio-wifi.sock`, owned `root:docker` mode `0660`. JSON shapes match `HomeInOne-pad/src/lib/wifi/client.ts`.
+Display endpoints (Caddy maps `/api/display/*` onto the same socket, stripping only `/api`), see `display.go`:
+
+- `GET  /display/brightness` — `{ pct }` (5-100)
+- `POST /display/brightness` — body `{ pct }`, applies + persists the level
+- `GET  /display/hold` — `{ sec }`, seconds of screen-on lease remaining (0 = none)
+- `POST /display/hold` — body `{ sec }` (0-300), keep the backlight on for `sec` from now; `0` releases
+
+`/display/hold` is a **renewable lease, not a latch** — the caller (an intercom call in
+`HomeInOne-pad`) re-POSTs it every 10s, so a crashed kiosk can't pin the screen on. It only
+records intent: `hio-display-idle.sh` polls the lease once a second and stays the sole writer
+of the backlight. That split matters — the backlight has two gates, `brightness` (PWM duty)
+and `bl_power` (FB blank state), and writing brightness alone while `bl_power=4` leaves the
+PWM at duty 0, i.e. the screen stays dark.
+
+The socket defaults to `/run/hio-wifi.sock`, owned `root:docker` mode `0660`. JSON shapes match `HomeInOne-pad/src/lib/wifi/client.ts` and `src/lib/display/client.ts`.
+
+> **Restarting this service breaks the UI's API until `pad-ui` is restarted too.** The socket
+> is bind-mounted into the Caddy container as a *file*; a restart recreates it with a new
+> inode and the container keeps serving the dead one (502 on every `/api/wifi/*` and
+> `/api/display/*`). After `systemctl restart hio-wifi-helper`, run
+> `docker restart pad-ui`.
 
 ## Build
 

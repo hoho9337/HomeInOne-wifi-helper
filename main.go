@@ -72,6 +72,8 @@ func main() {
 	// Backlight — see display.go. Caddy maps /api/display/* onto the same socket.
 	mux.HandleFunc("GET /display/brightness", brightnessGetHandler)
 	mux.HandleFunc("POST /display/brightness", brightnessSetHandler)
+	mux.HandleFunc("GET /display/hold", displayHoldGetHandler)
+	mux.HandleFunc("POST /display/hold", displayHoldSetHandler)
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 
