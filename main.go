@@ -3,7 +3,7 @@
 // On the HIO pad the Chromium-kiosk UI lives in a Docker container, so it can
 // reach neither NetworkManager nor /sys. This daemon runs as root on the host
 // and exposes the few things the UI legitimately needs to touch. Caddy in the
-// pad-ui container forwards to /run/hio-wifi.sock with the prefix stripped:
+// pad-ui container forwards to /run/hio/hio-wifi.sock with the prefix stripped:
 //
 //	/api/wifi/*    → /scan /status /connect /disconnect   (nmcli, this file)
 //	/api/display/* → /display/brightness                  (backlight, display.go)
@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -33,8 +34,19 @@ import (
 // Configurable seams. Defaults match production on the pad; tests override
 // HIO_WIFI_SOCKET (run unprivileged) and HIO_NMCLI (point at a mock).
 var (
-	socketPath = envOr("HIO_WIFI_SOCKET", "/run/hio-wifi.sock")
-	nmcliBin   = envOr("HIO_NMCLI", "nmcli")
+	// Inside a DIRECTORY that pad-ui bind-mounts, never as a bind-mounted file.
+	// A Docker file bind-mount is bound by inode, and this daemon deletes and
+	// re-binds its socket on every start — so with a file mount, restarting the
+	// helper left Caddy holding a dead inode and 502ing every /api/wifi/* and
+	// /api/display/* call until the container was restarted too. Mounting the
+	// parent directory means the container follows the new socket by name.
+	socketPath = envOr("HIO_WIFI_SOCKET", "/run/hio/hio-wifi.sock")
+	// Transitional: panels provisioned before that fix mount the old path as a
+	// file, so keep answering there. Serving both means the helper and the
+	// pad-ui image can be rolled out in either order. Set empty to disable;
+	// drop entirely once no fielded panel mounts the file.
+	legacySocketPath = envOr("HIO_WIFI_SOCKET_LEGACY", "/run/hio-wifi.sock")
+	nmcliBin         = envOr("HIO_NMCLI", "nmcli")
 )
 
 type Network struct {
@@ -55,13 +67,21 @@ type ConnectReq struct {
 }
 
 func main() {
-	_ = os.Remove(socketPath)
-	l, err := net.Listen("unix", socketPath)
+	l, err := listenUnix(socketPath)
 	if err != nil {
 		log.Fatalf("listen %s: %v", socketPath, err)
 	}
-	if err := setSocketPerms(socketPath); err != nil {
-		log.Printf("warn: socket perms: %v", err)
+	listeners := []net.Listener{l}
+	paths := []string{socketPath}
+	if legacySocketPath != "" && legacySocketPath != socketPath {
+		// Best-effort: a panel that has already moved to the directory mount has
+		// no reason to fail boot because the old path is unavailable.
+		if ll, lerr := listenUnix(legacySocketPath); lerr != nil {
+			log.Printf("warn: legacy socket %s: %v", legacySocketPath, lerr)
+		} else {
+			listeners = append(listeners, ll)
+			paths = append(paths, legacySocketPath)
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -77,7 +97,10 @@ func main() {
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 
-	// Graceful shutdown so the socket file gets cleaned up on SIGTERM.
+	// Graceful shutdown so the socket files get cleaned up on SIGTERM. The
+	// directory itself is deliberately left in place — removing it would change
+	// its inode on the next start and reintroduce the stale-mount bug one level
+	// up (which is also why this must not be a systemd RuntimeDirectory).
 	go func() {
 		sigs := make(chan os.Signal, 1)
 		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
@@ -85,13 +108,40 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(ctx)
-		_ = os.Remove(socketPath)
+		for _, p := range paths {
+			_ = os.Remove(p)
+		}
 	}()
 
-	log.Printf("hio-wifi-helper listening on %s (nmcli=%s)", socketPath, nmcliBin)
-	if err := srv.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	log.Printf("hio-wifi-helper listening on %s (nmcli=%s)", strings.Join(paths, ", "), nmcliBin)
+
+	// One server, several listeners: Serve blocks per listener, so all but the
+	// first run in goroutines and any of them failing is fatal.
+	errc := make(chan error, len(listeners))
+	for _, ln := range listeners {
+		go func(ln net.Listener) { errc <- srv.Serve(ln) }(ln)
+	}
+	if err := <-errc; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("serve: %v", err)
 	}
+}
+
+// listenUnix binds a fresh socket at p, creating its parent directory (with
+// MkdirAll, so an existing directory keeps its inode and any container mount of
+// it stays valid) and clearing a stale socket left by an unclean exit.
+func listenUnix(p string) (net.Listener, error) {
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return nil, err
+	}
+	_ = os.Remove(p)
+	l, err := net.Listen("unix", p)
+	if err != nil {
+		return nil, err
+	}
+	if err := setSocketPerms(p); err != nil {
+		log.Printf("warn: socket perms %s: %v", p, err)
+	}
+	return l, nil
 }
 
 // 0660 root:docker — the Caddy container bind-mounts the socket and connects

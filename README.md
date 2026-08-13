@@ -23,13 +23,22 @@ of the backlight. That split matters — the backlight has two gates, `brightnes
 and `bl_power` (FB blank state), and writing brightness alone while `bl_power=4` leaves the
 PWM at duty 0, i.e. the screen stays dark.
 
-The socket defaults to `/run/hio-wifi.sock`, owned `root:docker` mode `0660`. JSON shapes match `HomeInOne-pad/src/lib/wifi/client.ts` and `src/lib/display/client.ts`.
+The socket defaults to `/run/hio/hio-wifi.sock`, owned `root:docker` mode `0660`. JSON shapes match `HomeInOne-pad/src/lib/wifi/client.ts` and `src/lib/display/client.ts`.
 
-> **Restarting this service breaks the UI's API until `pad-ui` is restarted too.** The socket
-> is bind-mounted into the Caddy container as a *file*; a restart recreates it with a new
-> inode and the container keeps serving the dead one (502 on every `/api/wifi/*` and
-> `/api/display/*`). After `systemctl restart hio-wifi-helper`, run
-> `docker restart pad-ui`.
+**Why the socket sits in a directory (v0.1.1+).** `pad-ui` bind-mounts `/run/hio`, the
+*directory*, not the socket file. A Docker file bind-mount is bound by inode and this daemon
+deletes and re-binds its socket on every start, so with the old file mount a plain
+`systemctl restart hio-wifi-helper` left Caddy holding a dead inode and 502ing every
+`/api/wifi/*` and `/api/display/*` call until `pad-ui` was restarted too — while
+`curl --unix-socket` still worked, which is the fingerprint. Mounting the parent lets the
+container follow the new socket by name. For the same reason the directory must never be a
+systemd `RuntimeDirectory=`: systemd deletes it on stop, which would move the bug up one
+level.
+
+Panels provisioned before v0.1.1 mount the old path, so the daemon also listens on
+`/run/hio-wifi.sock` (`HIO_WIFI_SOCKET_LEGACY`, set empty to disable). That makes the helper
+and the `pad-ui` image rollable in either order; drop the legacy listener once no fielded
+panel mounts the file.
 
 ## Build
 
